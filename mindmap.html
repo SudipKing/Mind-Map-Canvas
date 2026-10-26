@@ -29,7 +29,7 @@
 <div id="emptyHint" class="pointer-events-none fixed inset-0 flex items-center justify-center">
   <div class="text-center px-6">
     <div class="text-3xl sm:text-4xl font-semibold text-gray-200">Start with a topic</div>
-    <div class="mt-3 text-gray-400">Type anything below — Claude will map it out. Click a bubble to dig deeper.</div>
+    <div class="mt-3 text-gray-400">Type anything below — AI will map it out. Click a bubble to dig deeper.</div>
   </div>
 </div>
 
@@ -38,6 +38,7 @@
   <div class="glass pointer-events-auto rounded-xl border border-gray-700/60 px-3 py-2 text-sm flex items-center gap-2">
     <span class="font-semibold">Mindmap</span>
     <span id="stats" class="text-gray-400">0 ideas</span>
+    <span id="modelBadge" class="hidden sm:inline text-gray-500 border-l border-gray-700 pl-2"></span>
   </div>
   <div class="flex gap-2 pointer-events-auto">
     <button id="fitBtn" title="Fit to screen (F)" class="glass rounded-xl border border-gray-700/60 w-10 h-10 grid place-items-center hover:bg-gray-700/60">
@@ -80,25 +81,42 @@
 
 <!-- Settings modal -->
 <div id="settingsModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-  <div class="glass w-full max-w-md rounded-2xl border border-gray-700 p-6">
+  <div class="glass w-full max-w-md max-h-[calc(100vh-2rem)] overflow-y-auto rounded-2xl border border-gray-700 p-6">
     <div class="flex items-center justify-between">
       <h2 class="text-lg font-semibold">Settings</h2>
       <button id="settingsClose" class="text-gray-400 hover:text-white">✕</button>
     </div>
 
-    <label class="block mt-5 text-sm text-gray-300">Anthropic API key</label>
+    <label class="block mt-5 text-sm text-gray-300">AI provider</label>
+    <select id="providerInput"
+      class="mt-1 w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"></select>
+
+    <div id="baseUrlRow" class="hidden">
+      <label class="block mt-4 text-sm text-gray-300">Base URL</label>
+      <input id="baseUrlInput" spellcheck="false" placeholder="http://localhost:11434/v1"
+        class="mt-1 w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+      <p class="mt-1 text-xs text-gray-400">Any OpenAI-compatible endpoint: OpenRouter, Groq, DeepSeek, Mistral, Together, Ollama, LM Studio…</p>
+    </div>
+
+    <label class="block mt-4 text-sm text-gray-300"><span id="keyLabel">API key</span></label>
     <div class="mt-1 flex gap-2">
-      <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"
+      <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false"
         class="flex-1 rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
       <button id="toggleKey" type="button" class="rounded-lg border border-gray-700 px-3 text-sm hover:bg-gray-800">Show</button>
     </div>
     <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-      Stored only in this browser's localStorage and sent only to api.anthropic.com. Anyone with access to this browser profile can read it — use a key with a spend limit.
+      Each provider's key is stored only in this browser's localStorage and sent only to <span id="keyHost"></span>. Anyone with access to this browser profile can read it — use keys with spend limits.
     </p>
 
     <label class="block mt-4 text-sm text-gray-300">Model</label>
-    <input id="modelInput" spellcheck="false"
-      class="mt-1 w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+    <div class="mt-1 flex gap-2">
+      <input id="modelInput" spellcheck="false" list="modelList"
+        class="flex-1 min-w-0 rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+      <button id="fetchModels" type="button" title="Load the models your key can use"
+        class="rounded-lg border border-gray-700 px-3 text-sm hover:bg-gray-800 whitespace-nowrap">Load list</button>
+    </div>
+    <datalist id="modelList"></datalist>
+    <p id="modelsNote" class="mt-1 text-xs text-gray-400"></p>
 
     <label class="block mt-4 text-sm text-gray-300">Ideas per request: <span id="countLabel"></span></label>
     <input id="countInput" type="range" min="3" max="12" class="mt-1 w-full accent-indigo-500" />
@@ -125,8 +143,20 @@
   'use strict';
 
   // ---------- Config & storage ----------
-  const LS = { key: 'mindmap.apiKey', model: 'mindmap.model', count: 'mindmap.count', graph: 'mindmap.graph' };
-  const DEFAULT_MODEL = 'claude-sonnet-5-5';
+  const LS = {
+    provider: 'mindmap.provider', count: 'mindmap.count', graph: 'mindmap.graph', baseUrl: 'mindmap.baseUrl',
+    key: (p) => `mindmap.key.${p}`, model: (p) => `mindmap.model.${p}`,
+  };
+  // `api` picks the request format; most vendors speak the OpenAI chat-completions dialect.
+  const PROVIDERS = {
+    anthropic: { name: 'Claude (Anthropic)', api: 'anthropic', model: 'claude-sonnet-5-5', host: 'api.anthropic.com', keyHint: 'sk-ant-…' },
+    openai:    { name: 'OpenAI (GPT)', api: 'openai', base: 'https://api.openai.com/v1', model: 'gpt-5', host: 'api.openai.com', keyHint: 'sk-…' },
+    gemini:    { name: 'Google Gemini', api: 'gemini', model: 'gemini-2.5-flash', host: 'generativelanguage.googleapis.com', keyHint: 'AIza…' },
+    xai:       { name: 'xAI Grok', api: 'openai', base: 'https://api.x.ai/v1', model: 'grok-4', host: 'api.x.ai', keyHint: 'xai-…' },
+    custom:    { name: 'Other (OpenAI-compatible URL)', api: 'openai', model: '', host: 'the base URL above', keyHint: 'Leave blank for local servers', keyOptional: true },
+  };
+  const provider = () => (PROVIDERS[store.get(LS.provider)] ? store.get(LS.provider) : 'anthropic');
+  const modelFor = (p) => store.get(LS.model(p)) || PROVIDERS[p].model;
   const PALETTE = ['#6366f1', '#ec4899', '#14b8a6', '#f59e0b', '#8b5cf6', '#22c55e', '#ef4444', '#0ea5e9', '#f97316', '#a3e635'];
 
   const store = {
@@ -136,6 +166,13 @@
   };
 
   const $ = (id) => document.getElementById(id);
+
+  // Migrate settings from the Claude-only version.
+  if (store.get('mindmap.apiKey')) {
+    store.set(LS.key('anthropic'), store.get('mindmap.apiKey'));
+    if (store.get('mindmap.model')) store.set(LS.model('anthropic'), store.get('mindmap.model'));
+    store.del('mindmap.apiKey'); store.del('mindmap.model');
+  }
 
   // ---------- Network ----------
   const nodes = new vis.DataSet();
@@ -220,7 +257,7 @@
     requestAnimationFrame(step);
   }
 
-  // ---------- Claude ----------
+  // ---------- AI providers ----------
   const TOOL = {
     name: 'add_ideas',
     description: 'Add new idea nodes and the edges connecting them to the mind map.',
@@ -256,9 +293,14 @@
     },
   };
 
-  async function askClaude(userText, focus) {
-    const apiKey = store.get(LS.key);
-    if (!apiKey) { openSettings(); throw new Error('Add your Anthropic API key in Settings first.'); }
+  const SYSTEM = 'You are a creative brainstorming partner that builds mind maps. Always respond by calling the add_ideas tool. Labels are short; descriptions are crisp and concrete. Never reuse an existing node id for a new node.';
+
+  async function askAI(userText, focus) {
+    const p = provider(), cfg = PROVIDERS[p];
+    const apiKey = store.get(LS.key(p), '');
+    if (!apiKey && !cfg.keyOptional) { openSettings(); throw new Error(`Add your ${cfg.name} API key in Settings first.`); }
+    const model = modelFor(p);
+    if (!model) { openSettings(); throw new Error('Choose a model in Settings first.'); }
     const count = +store.get(LS.count, '6');
 
     const existing = nodes.get().slice(-150).map((n) => `${n.id}: ${n.rawLabel}`).join('\n');
@@ -280,34 +322,98 @@
         (nodes.length ? `. You may cross-link to existing nodes where genuinely relevant.\n\nExisting nodes (id: label):\n${existing}` : '.');
     }
 
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: store.get(LS.model, DEFAULT_MODEL),
-        max_tokens: 4096,
-        system: 'You are a creative brainstorming partner that builds mind maps. Always respond by calling the add_ideas tool. Labels are short; descriptions are crisp and concrete. Never reuse an existing node id for a new node.',
-        tools: [TOOL],
-        tool_choice: { type: 'tool', name: 'add_ideas' },
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
+    const call = { anthropic: callAnthropic, openai: callOpenAI, gemini: callGemini }[cfg.api];
+    return validate(await call({ apiKey, model, prompt, base: baseUrl(p) }));
+  }
 
+  function baseUrl(p) {
+    return (p === 'custom' ? store.get(LS.baseUrl, '') : PROVIDERS[p].base || '').replace(/\/+$/, '');
+  }
+
+  async function postJSON(url, headers, body) {
+    let res;
+    try {
+      res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    } catch {
+      throw new Error(`Couldn't reach ${new URL(url).host}. Check your connection, the URL, or whether this provider allows browser requests (CORS).`);
+    }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error?.message || `API error ${res.status}`);
+    if (!res.ok) throw new Error(errorMessage(data) || `API error ${res.status}`);
+    return data;
+  }
+  const errorMessage = (d) => d?.error?.message || (Array.isArray(d) && d[0]?.error?.message) || (typeof d?.error === 'string' && d.error) || d?.message;
+
+  async function callAnthropic({ apiKey, model, prompt }) {
+    const data = await postJSON('https://api.anthropic.com/v1/messages', anthropicHeaders(apiKey), {
+      model, max_tokens: 4096, system: SYSTEM,
+      tools: [TOOL], tool_choice: { type: 'tool', name: TOOL.name },
+      messages: [{ role: 'user', content: prompt }],
+    });
     const block = (data.content || []).find((b) => b.type === 'tool_use');
-    if (!block) throw new Error('Claude did not return structured ideas. Try again.');
-    return validate(block.input);
+    if (block) return block.input;
+    return extractJSON((data.content || []).map((b) => b.text || '').join(''));
+  }
+  const anthropicHeaders = (apiKey) => ({
+    'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true',
+  });
+
+  // OpenAI chat completions — also used by xAI and any OpenAI-compatible server.
+  async function callOpenAI({ apiKey, model, prompt, base }) {
+    if (!base) throw new Error('Set a base URL in Settings first.');
+    const data = await postJSON(`${base}/chat/completions`, apiKey ? { authorization: `Bearer ${apiKey}` } : {}, {
+      model,
+      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }],
+      tools: [{ type: 'function', function: { name: TOOL.name, description: TOOL.description, parameters: TOOL.input_schema } }],
+      tool_choice: { type: 'function', function: { name: TOOL.name } },
+    });
+    const msg = data.choices?.[0]?.message || {};
+    const args = msg.tool_calls?.[0]?.function?.arguments;
+    if (args) return typeof args === 'string' ? JSON.parse(args) : args;
+    return extractJSON(msg.content);
+  }
+
+  async function callGemini({ apiKey, model, prompt }) {
+    const name = model.replace(/^models\//, '');
+    const data = await postJSON(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(name)}:generateContent`, { 'x-goog-api-key': apiKey }, {
+      systemInstruction: { parts: [{ text: SYSTEM }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      tools: [{ functionDeclarations: [{ name: TOOL.name, description: TOOL.description, parameters: TOOL.input_schema }] }],
+      toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [TOOL.name] } },
+    });
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const fc = parts.find((x) => x.functionCall)?.functionCall;
+    if (fc) return fc.args;
+    return extractJSON(parts.map((x) => x.text || '').join(''));
+  }
+
+  // Fallback for models that answer in plain text instead of calling the tool.
+  function extractJSON(text) {
+    const s = String(text || ''), a = s.indexOf('{'), b = s.lastIndexOf('}');
+    if (a < 0 || b <= a) throw new Error("The model didn't return structured ideas. Try again or pick a model that supports tool calling.");
+    try { return JSON.parse(s.slice(a, b + 1)); }
+    catch { throw new Error('The model returned malformed JSON. Try again.'); }
+  }
+
+  async function listModels(p, apiKey, base) {
+    const get = async (url, headers) => {
+      const res = await fetch(url, { headers }).catch(() => { throw new Error(`Couldn't reach ${new URL(url).host}.`); });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(errorMessage(data) || `API error ${res.status}`);
+      return data;
+    };
+    const api = PROVIDERS[p].api;
+    if (api === 'anthropic') return (await get('https://api.anthropic.com/v1/models?limit=100', anthropicHeaders(apiKey))).data.map((m) => m.id);
+    if (api === 'gemini') {
+      const d = await get('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { 'x-goog-api-key': apiKey });
+      return d.models.filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => m.name.replace(/^models\//, ''));
+    }
+    if (!base) throw new Error('Set a base URL first.');
+    return (await get(`${base}/models`, apiKey ? { authorization: `Bearer ${apiKey}` } : {})).data.map((m) => m.id).sort();
   }
 
   function validate(input) {
     const out = { nodes: [], edges: [] };
-    if (!input || !Array.isArray(input.nodes)) throw new Error('Malformed response from Claude.');
+    if (!input || !Array.isArray(input.nodes)) throw new Error('Malformed response from the model.');
     for (const n of input.nodes) {
       if (n && typeof n.id === 'string' && typeof n.label === 'string' && n.label.trim())
         out.nodes.push({ id: n.id.trim(), label: n.label.trim().slice(0, 80), description: String(n.description || '').slice(0, 600) });
@@ -316,7 +422,7 @@
       if (e && typeof e.from === 'string' && typeof e.to === 'string')
         out.edges.push({ from: e.from.trim(), to: e.to.trim(), label: e.label ? String(e.label).slice(0, 40) : '' });
     }
-    if (!out.nodes.length) throw new Error('Claude returned no ideas. Try rephrasing.');
+    if (!out.nodes.length) throw new Error('The model returned no ideas. Try rephrasing.');
     return out;
   }
 
@@ -324,7 +430,7 @@
   const uid = () => 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
   function merge(result, focus) {
-    // Map Claude's ids to globally unique ids; existing ids pass through.
+    // Map the model's ids to globally unique ids; existing ids pass through.
     const idMap = new Map();
     const byLabel = new Map(nodes.get().map((n) => [n.rawLabel.toLowerCase(), n.id]));
     for (const n of result.nodes) {
@@ -452,7 +558,7 @@
     setBusy(true);
     try {
       const target = focusId;
-      const result = await askClaude(text, target);
+      const result = await askAI(text, target);
       const ids = merge(result, target);
       $('promptInput').value = '';
       if (target) { dimOthers(target, ids); network.selectNodes([target]); }
@@ -534,10 +640,57 @@
   }
 
   // ---------- Settings ----------
+  // Unsaved per-provider edits, so switching the dropdown back and forth doesn't lose typing.
+  let drafts = {}, shownProvider = null;
+
+  $('providerInput').innerHTML = Object.entries(PROVIDERS).map(([id, c]) => `<option value="${id}">${c.name}</option>`).join('');
+
+  function stashDraft() {
+    if (shownProvider) drafts[shownProvider] = { key: $('apiKeyInput').value.trim(), model: $('modelInput').value.trim() };
+  }
+  function showProvider(p) {
+    stashDraft();
+    shownProvider = p;
+    const cfg = PROVIDERS[p], d = drafts[p];
+    $('providerInput').value = p;
+    $('baseUrlRow').classList.toggle('hidden', p !== 'custom');
+    $('keyLabel').textContent = `${cfg.name} API key${cfg.keyOptional ? ' (optional)' : ''}`;
+    $('keyHost').textContent = cfg.host;
+    $('apiKeyInput').placeholder = cfg.keyHint;
+    $('apiKeyInput').value = d ? d.key : store.get(LS.key(p), '');
+    $('modelInput').value = d ? d.model : modelFor(p);
+    $('modelInput').placeholder = cfg.model || 'e.g. llama3.1, deepseek-chat';
+    $('modelList').innerHTML = '';
+    $('modelsNote').textContent = '';
+  }
+  $('providerInput').addEventListener('change', () => showProvider($('providerInput').value));
+
+  $('fetchModels').addEventListener('click', async () => {
+    const p = shownProvider, btn = $('fetchModels');
+    btn.disabled = true; btn.textContent = 'Loading…';
+    try {
+      const base = p === 'custom' ? $('baseUrlInput').value.trim().replace(/\/+$/, '') : baseUrl(p);
+      const ids = await listModels(p, $('apiKeyInput').value.trim(), base);
+      $('modelList').innerHTML = '';
+      for (const id of ids) { const o = document.createElement('option'); o.value = id; $('modelList').appendChild(o); }
+      $('modelsNote').textContent = `${ids.length} model${ids.length === 1 ? '' : 's'} found — click the model box to pick one.`;
+    } catch (err) {
+      $('modelsNote').textContent = 'Could not load models: ' + err.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Load list';
+    }
+  });
+
+  function updateBadge() {
+    const p = provider();
+    $('modelBadge').textContent = `${PROVIDERS[p].name.split(' (')[0]} · ${modelFor(p) || 'no model'}`;
+  }
+
   function openSettings() {
-    $('apiKeyInput').value = store.get(LS.key, '');
+    drafts = {}; shownProvider = null;
+    $('baseUrlInput').value = store.get(LS.baseUrl, '');
+    showProvider(provider());
     $('apiKeyInput').type = 'password'; $('toggleKey').textContent = 'Show';
-    $('modelInput').value = store.get(LS.model, DEFAULT_MODEL);
     $('countInput').value = store.get(LS.count, '6');
     $('countLabel').textContent = $('countInput').value;
     $('settingsModal').classList.remove('hidden');
@@ -555,13 +708,20 @@
   });
   $('countInput').addEventListener('input', () => { $('countLabel').textContent = $('countInput').value; });
   $('saveSettings').addEventListener('click', () => {
-    const key = $('apiKeyInput').value.trim();
-    key ? store.set(LS.key, key) : store.del(LS.key);
-    store.set(LS.model, $('modelInput').value.trim() || DEFAULT_MODEL);
+    stashDraft();
+    for (const [p, d] of Object.entries(drafts)) {
+      d.key ? store.set(LS.key(p), d.key) : store.del(LS.key(p));
+      d.model && d.model !== PROVIDERS[p].model ? store.set(LS.model(p), d.model) : store.del(LS.model(p));
+    }
+    store.set(LS.provider, shownProvider);
+    store.set(LS.baseUrl, $('baseUrlInput').value.trim());
     store.set(LS.count, $('countInput').value);
-    closeSettings(); hideError();
+    updateBadge(); closeSettings(); hideError();
   });
-  $('forgetKey').addEventListener('click', () => { store.del(LS.key); $('apiKeyInput').value = ''; });
+  $('forgetKey').addEventListener('click', () => {
+    store.del(LS.key(shownProvider)); $('apiKeyInput').value = '';
+    if (drafts[shownProvider]) drafts[shownProvider].key = '';
+  });
 
   $('exportBtn').addEventListener('click', () => {
     download(new Blob([JSON.stringify(serialize(), null, 2)], { type: 'application/json' }), `mindmap-${new Date().toISOString().slice(0, 10)}.json`);
@@ -601,8 +761,8 @@
 
   // ---------- Boot ----------
   try { const saved = store.get(LS.graph); if (saved) load(JSON.parse(saved)); } catch { store.del(LS.graph); }
-  updateUI();
-  if (!store.get(LS.key)) openSettings(); else $('promptInput').focus();
+  updateUI(); updateBadge();
+  if (!store.get(LS.key(provider())) && !PROVIDERS[provider()].keyOptional) openSettings(); else $('promptInput').focus();
 })();
 </script>
 </body>
